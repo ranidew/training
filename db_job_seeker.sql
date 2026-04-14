@@ -24,6 +24,7 @@ CREATE TABLE `users` (
   `role` enum('member','company') NOT NULL,
   `is_verified` tinyint(1) DEFAULT '0',
   `verification_token` varchar(255) DEFAULT NULL,
+  `token_expires_at` datetime DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)

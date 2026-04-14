@@ -3,69 +3,89 @@ require_once '../../includes/session.php';
 require_once '../../config/env.php';
 require_once '../../includes/auth.php';
 require_once '../../includes/file_upload.php';
-
+require_once '../../includes/csrf.php';
 
 $auth = new Auth();
-$auth->checkAccess('member');
+$auth->checkAccess('member'); // SCP-AC-002, SCP-AC-003
 
 $message = '';
-if (isset($_GET['msg']) && $_GET['msg'] === 'success') {
-    $message = 'Profile updated successfully!';
-}
-$error = '';
+$error   = '';
+// SCP-AC-004: user_id dari session, bukan dari input
+$user_id = (int)$_SESSION['user_id'];
 
-$user_id = isset($_SESSION['user_id']) ? $_SESSION['user_id'] : 0;
 require_once '../../config/database.php';
-$db = new Database();
+$db   = new Database();
 $conn = $db->getConnection();
 
-
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Check if user is actually logged in (prevent foreign key constraint violation)
-    if ($user_id <= 0) {
-        $error = 'You must be logged in to update your profile.';
+    // SCP-CSRF-002
+    CSRF::verify();
+
+    // SCP-IV-001, SCP-IV-003: Validasi & sanitasi input
+    $full_name = trim($_POST['full_name'] ?? '');
+    $phone     = trim($_POST['phone']     ?? '');
+    $address   = trim($_POST['address']   ?? '');
+
+    if (strlen($full_name) > 100 || strlen($phone) > 20 || strlen($address) > 500) {
+        $error = 'Input melebihi batas panjang yang diizinkan.';
+    } elseif ($phone !== '' && !preg_match('/^[\d\+\-\(\) ]+$/', $phone)) {
+        $error = 'Format nomor telepon tidak valid.';
     } else {
-        $full_name = $_POST['full_name'];
-        $phone = $_POST['phone'];
-        $address = $_POST['address'];
+        $photo_path = null;
 
-        
-        $full_name_escaped = addslashes($full_name);
-        $phone_escaped = addslashes($phone);
-        $address_escaped = addslashes($address);
-
-        $profile_photo = '';
-        if (isset($_FILES['profile_photo']) && $_FILES['profile_photo']['error'] === 0) {
-            $profile_photo = FileUpload::uploadFile($_FILES['profile_photo'], 'profiles');
-        }
-        $profile_photo_escaped = addslashes($profile_photo);
-
-
-
-        $query = "INSERT INTO member_profiles (user_id, full_name, phone, address, profile_photo)
-                 VALUES ('$user_id', '$full_name_escaped', '$phone_escaped', '$address_escaped', '$profile_photo_escaped')
-                 ON DUPLICATE KEY UPDATE
-                 full_name = '$full_name_escaped', phone = '$phone_escaped', address = '$address_escaped'";
-
-        if ($profile_photo_escaped) {
-            $query .= ", profile_photo = '$profile_photo_escaped'";
+        if (isset($_FILES['profile_photo']) && $_FILES['profile_photo']['error'] === UPLOAD_ERR_OK) {
+            // SCP-FU-001, SCP-FU-002, SCP-FU-003, SCP-FU-005
+            $uploaded = FileUpload::uploadFile(
+                $_FILES['profile_photo'],
+                'profiles',
+                UPLOAD_ALLOWED_PHOTO_TYPES
+            );
+            if ($uploaded === false) {
+                $error = 'File foto tidak valid. Hanya JPG, PNG, GIF maks 5 MB.';
+            } else {
+                $photo_path = $uploaded;
+            }
         }
 
-        if ($conn->query($query)) {
+        if (!$error) {
+            // SCP-SQL-001: Prepared statement
+            if ($photo_path !== null) {
+                $stmt = $conn->prepare(
+                    "INSERT INTO member_profiles (user_id, full_name, phone, address, profile_photo)
+                     VALUES (?, ?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                     full_name = VALUES(full_name),
+                     phone = VALUES(phone),
+                     address = VALUES(address),
+                     profile_photo = VALUES(profile_photo)"
+                );
+                $stmt->execute([$user_id, $full_name, $phone, $address, $photo_path]);
+            } else {
+                $stmt = $conn->prepare(
+                    "INSERT INTO member_profiles (user_id, full_name, phone, address)
+                     VALUES (?, ?, ?, ?)
+                     ON DUPLICATE KEY UPDATE
+                     full_name = VALUES(full_name),
+                     phone = VALUES(phone),
+                     address = VALUES(address)"
+                );
+                $stmt->execute([$user_id, $full_name, $phone, $address]);
+            }
             header('Location: profile.php?msg=success');
             exit;
-        } else {
-            $error = 'Failed to update profile.';
         }
     }
 }
 
-// Get current profile
-$query = "SELECT * FROM member_profiles WHERE user_id = $user_id ORDER BY id DESC";
-$result = $conn->query($query);
-$profile = $result->fetch(PDO::FETCH_ASSOC);
+if (isset($_GET['msg']) && $_GET['msg'] === 'success') {
+    $message = 'Profil berhasil diperbarui!';
+}
 
-// Include templates ONLY after all logic and redirection
+// SCP-SQL-001
+$stmt = $conn->prepare("SELECT * FROM member_profiles WHERE user_id = ? ORDER BY id DESC LIMIT 1");
+$stmt->execute([$user_id]);
+$profile = $stmt->fetch(PDO::FETCH_ASSOC);
+
 require_once '../../templates/header.php';
 require_once '../../templates/nav.php';
 ?>
@@ -76,84 +96,62 @@ require_once '../../templates/nav.php';
             <div class="sidebar p-3">
                 <h5>Member Panel</h5>
                 <ul class="nav flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link" href="dashboard.php">Dashboard</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="profile.php">Profile</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="cv.php">CV</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="jobs.php">Jobs</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="history.php">History</a>
-                    </li>
+                    <li class="nav-item"><a class="nav-link" href="dashboard.php">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link active" href="profile.php">Profile</a></li>
+                    <li class="nav-item"><a class="nav-link" href="cv.php">CV</a></li>
+                    <li class="nav-item"><a class="nav-link" href="jobs.php">Jobs</a></li>
+                    <li class="nav-item"><a class="nav-link" href="history.php">History</a></li>
                 </ul>
             </div>
         </div>
-        
+
         <div class="col-md-9">
             <div class="main-content">
                 <h2>My Profile</h2>
-                
+
                 <?php if ($message): ?>
-                    <div class="alert alert-success"><?php echo $message; ?></div>
+                    <div class="alert alert-success"><?php echo htmlspecialchars($message, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
                 <?php if ($error): ?>
-                    <div class="alert alert-danger"><?php echo $error; ?></div>
+                    <div class="alert alert-danger"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
-                
+
                 <div class="card">
                     <div class="card-body">
                         <form method="POST" enctype="multipart/form-data">
+                            <?php echo CSRF::input(); /* SCP-CSRF-001 */ ?>
+
                             <div class="row">
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label for="full_name" class="form-label">Full Name</label>
-                                        <input type="text" class="form-control" id="full_name" name="full_name" 
-                                               value="<?php echo isset($profile['full_name']) ? $profile['full_name'] : ''; ?>">
+                                        <input type="text" class="form-control" id="full_name" name="full_name"
+                                               maxlength="100"
+                                               value="<?php echo htmlspecialchars($profile['full_name'] ?? '', ENT_QUOTES, 'UTF-8'); ?>">
                                     </div>
                                 </div>
-                                
                                 <div class="col-md-6">
                                     <div class="mb-3">
                                         <label for="phone" class="form-label">Phone</label>
-                                        <input type="text" class="form-control" id="phone" name="phone" 
-                                               value="<?php echo isset($profile['phone']) ? $profile['phone'] : ''; ?>">
+                                        <input type="text" class="form-control" id="phone" name="phone"
+                                               maxlength="20"
+                                               value="<?php echo htmlspecialchars($profile['phone'] ?? '', ENT_QUOTES, 'UTF-8'); ?>">
                                     </div>
                                 </div>
                             </div>
-                            
+
                             <div class="mb-3">
                                 <label for="address" class="form-label">Address</label>
-                                <textarea class="form-control" id="address" name="address" rows="3"><?php echo isset($profile['address']) ? $profile['address'] : ''; ?></textarea>
+                                <textarea class="form-control" id="address" name="address" rows="3" maxlength="500"><?php echo htmlspecialchars($profile['address'] ?? '', ENT_QUOTES, 'UTF-8'); ?></textarea>
                             </div>
-                            
+
                             <div class="mb-3">
                                 <label for="profile_photo" class="form-label">Profile Photo</label>
-
-                                <?php if (isset($profile['profile_photo']) && $profile['profile_photo']): ?>
-                                    <div class="mb-3">
-                                        <div class="current-photo">
-                                            <p class="text-muted mb-2">Current Photo:</p>
-                                            <img src="<?php echo BASE_URL . '/' . htmlspecialchars($profile['profile_photo']); ?>"
-                                                 alt="Current Profile Photo"
-                                                 class="img-thumbnail"
-                                                 style="max-width: 200px; max-height: 200px; object-fit: cover;">
-                                            <div class="mt-1">
-                                                <small class="text-muted">File: <?php echo basename($profile['profile_photo']); ?></small>
-                                            </div>
-                                        </div>
-                                    </div>
-                                <?php endif; ?>
-
-                                <input type="file" class="form-control" id="profile_photo" name="profile_photo" accept="image/*">
-                                <div class="form-text">Choose a new photo to replace the current one (JPG, PNG, GIF)</div>
+                                <input type="file" class="form-control" id="profile_photo" name="profile_photo"
+                                       accept="image/jpeg,image/png,image/gif">
+                                <div class="form-text">JPG, PNG, GIF – maks. 5 MB.</div>
                             </div>
-                            
+
                             <button type="submit" class="btn btn-primary">Update Profile</button>
                         </form>
                     </div>
@@ -162,32 +160,5 @@ require_once '../../templates/nav.php';
         </div>
     </div>
 </div>
-
-<script>
-    document.getElementById('full_name').addEventListener('input', function(e) {
-        document.getElementById('name-preview').innerHTML = 'Hello, ' + e.target.value;
-    });
-    
-    document.getElementById('profile_photo').addEventListener('change', function(e) {
-        var file = e.target.files[0];
-        if (file) {
-            var reader = new FileReader();
-            reader.onload = function(e) {
-                // Show preview of new photo
-                var previewHtml = '<div class="mt-3"><p class="text-muted mb-2">New Photo Preview:</p>' +
-                                '<img src="' + e.target.result + '" class="img-thumbnail" ' +
-                                'style="max-width: 200px; max-height: 200px; object-fit: cover;"></div>';
-                document.getElementById('photo-preview').innerHTML = previewHtml;
-            };
-            reader.readAsDataURL(file);
-        } else {
-            // Clear preview if no file selected
-            document.getElementById('photo-preview').innerHTML = '';
-        }
-    });
-</script>
-
-<div id="name-preview"></div>
-<div id="photo-preview"></div>
 
 <?php require_once '../../templates/footer.php'; ?>

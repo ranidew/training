@@ -2,36 +2,47 @@
 require_once '../../includes/session.php';
 require_once '../../config/env.php';
 require_once '../../includes/auth.php';
+require_once '../../includes/csrf.php';
 
-$message = '';
 $error = '';
 
-// Handle registration BEFORE any output
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $username = $_POST['username'];
-    $email = $_POST['email'];
-    $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
-    $role = $_POST['role'];
-    
-    
-    
-    $auth = new Auth();
-    
-    $token = $auth->register($username, $email, $password, $role);
-    if ($token) {
-        header('Location: registration-success.php?token=' . $token);
-        exit;
+    // SCP-CSRF-002
+    CSRF::verify();
+
+    // SCP-IV-001, SCP-IV-002: Validasi server-side
+    $username         = trim($_POST['username'] ?? '');
+    $email            = trim($_POST['email']    ?? '');
+    $password         = $_POST['password']         ?? '';
+    $confirm_password = $_POST['confirm_password'] ?? '';
+    $role             = $_POST['role']             ?? '';
+
+    if ($username === '' || $email === '' || $password === '' || $role === '') {
+        $error = 'Semua field wajib diisi.';
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = 'Format email tidak valid.';
+    } elseif (!in_array($role, ['member', 'company'], true)) {
+        $error = 'Role tidak valid.';
+    } elseif ($password !== $confirm_password) {
+        $error = 'Password dan konfirmasi password tidak cocok.';
     } else {
-        $error = 'Registration failed. Please try again.';
+        $auth   = new Auth();
+        $result = $auth->register($username, $email, $password, $role);
+
+        if (isset($result['token'])) {
+            header('Location: registration-success.php?token=' . urlencode($result['token']));
+            exit;
+        } else {
+            // SCP-EH-003: Pesan dari auth sudah generik
+            $error = $result['error'] ?? 'Registrasi gagal. Silakan coba lagi.';
+        }
     }
 }
 
-// Include templates AFTER registration processing
 require_once '../../templates/header.php';
 require_once '../../templates/nav.php';
 
-$default_role = isset($_GET['role']) ? $_GET['role'] : 'member';
+$default_role = in_array($_GET['role'] ?? '', ['member', 'company']) ? $_GET['role'] : 'member';
 ?>
 
 <div class="container mt-4">
@@ -42,73 +53,58 @@ $default_role = isset($_GET['role']) ? $_GET['role'] : 'member';
                     <h4>Register</h4>
                 </div>
                 <div class="card-body">
-                    <?php if ($message): ?>
-                        <div class="alert alert-success"><?php echo $message; ?></div>
-                    <?php endif; ?>
                     <?php if ($error): ?>
-                        <div class="alert alert-danger"><?php echo $error; ?></div>
+                        <div class="alert alert-danger"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
                     <?php endif; ?>
-                    
+
                     <form method="POST">
+                        <?php echo CSRF::input(); /* SCP-CSRF-001 */ ?>
+
                         <div class="mb-3">
                             <label for="username" class="form-label">Username</label>
-                            <input type="text" class="form-control" id="username" name="username" required>
+                            <input type="text" class="form-control" id="username" name="username"
+                                   maxlength="50" required autocomplete="username">
                         </div>
-                        
+
                         <div class="mb-3">
                             <label for="email" class="form-label">Email</label>
-                            <input type="email" class="form-control" id="email" name="email" required>
+                            <input type="email" class="form-control" id="email" name="email"
+                                   maxlength="100" required autocomplete="email">
                         </div>
-                        
+
                         <div class="mb-3">
                             <label for="password" class="form-label">Password</label>
-                            <input type="password" class="form-control" id="password" name="password" required>
+                            <input type="password" class="form-control" id="password" name="password"
+                                   required autocomplete="new-password">
+                            <div class="form-text">
+                                Min. 8 karakter, kombinasi huruf besar, huruf kecil, angka, dan simbol.
+                            </div>
                         </div>
-                        
+
                         <div class="mb-3">
-                            <label for="confirm_password" class="form-label">Confirm Password</label>
-                            <input type="password" class="form-control" id="confirm_password" name="confirm_password" required>
+                            <label for="confirm_password" class="form-label">Konfirmasi Password</label>
+                            <input type="password" class="form-control" id="confirm_password" name="confirm_password"
+                                   required autocomplete="new-password">
                         </div>
-                        
+
                         <div class="mb-3">
                             <label for="role" class="form-label">Role</label>
                             <select class="form-control" id="role" name="role" required>
-                                <option value="member" <?php echo $default_role === 'member' ? 'selected' : ''; ?>>Job Seeker</option>
+                                <option value="member"  <?php echo $default_role === 'member'  ? 'selected' : ''; ?>>Job Seeker</option>
                                 <option value="company" <?php echo $default_role === 'company' ? 'selected' : ''; ?>>Company</option>
                             </select>
                         </div>
-                        
+
                         <button type="submit" class="btn btn-primary w-100">Register</button>
                     </form>
-                    
+
                     <div class="text-center mt-3">
-                        <p>Already have an account? <a href="login.php">Login here</a></p>
+                        <p>Sudah punya akun? <a href="login.php">Login di sini</a></p>
                     </div>
                 </div>
             </div>
         </div>
     </div>
 </div>
-
-
-<script>
-    document.getElementById('username').addEventListener('input', function(e) {
-        
-        document.getElementById('username-feedback').innerHTML = 'Username: ' + e.target.value;
-    });
-    
-    
-    document.querySelector('form').addEventListener('submit', function(e) {
-        var password = document.getElementById('password').value;
-        var confirmPassword = document.getElementById('confirm_password').value;
-        
-        if (password !== confirmPassword) {
-            alert('Passwords do not match!');
-            e.preventDefault();
-        }
-    });
-</script>
-
-<div id="username-feedback"></div>
 
 <?php require_once '../../templates/footer.php'; ?>

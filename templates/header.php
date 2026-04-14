@@ -31,21 +31,11 @@
             }
         }
     </style>
-    
-    
-    <script>
-        // Expose JWT secret to client-side
-        window.JWT_SECRET = '<?php echo JWT_SECRET; ?>';
-        
-        
-        <?php if (isset($_SESSION['user_id'])): ?>
-        window.currentUser = {
-            id: <?php echo $_SESSION['user_id']; ?>,
-            username: '<?php echo $_SESSION['username']; ?>',
-            role: '<?php echo $_SESSION['role']; ?>'
-        };
-        <?php endif; ?>
-    </script>
+    <?php
+    // SCP-DP-002: JWT_SECRET TIDAK diekspos ke client
+    // SCP-DP-003: Data session TIDAK dicatat ke console
+    // window.currentUser dihapus – role-based logic ada di server-side
+    ?>
 </head>
 <body>
     <div class="container-fluid">

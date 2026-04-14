@@ -2,118 +2,114 @@
 require_once '../../includes/session.php';
 require_once '../../config/env.php';
 require_once '../../includes/auth.php';
-require_once '../../templates/header.php';
-require_once '../../templates/nav.php';
+require_once '../../includes/csrf.php';
 
 $auth = new Auth();
-$auth->checkAccess('company');
-
-$message = '';
-$error = '';
-
-// Handle messages from redirects
-if (isset($_GET['msg']) && $_GET['msg'] === 'deleted') {
-    $message = 'Job deleted successfully!';
-}
-if (isset($_GET['err']) && $_GET['err'] === 'unauthorized') {
-    $error = 'Unauthorized: You can only modify your own jobs.';
-}
+$auth->checkAccess('company'); // SCP-AC-002, SCP-AC-003
 
 require_once '../../config/database.php';
-$db = new Database();
-$conn = $db->getConnection();
+$db      = new Database();
+$conn    = $db->getConnection();
+// SCP-AC-004: user_id dari session
+$user_id = (int)$_SESSION['user_id'];
 
-$user_id = isset($_SESSION['user_id']) ? $_SESSION['user_id'] : 0;
+$message = '';
+$error   = '';
 
-// Handle job creation/update
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Check if user is actually logged in (prevent foreign key constraint violation)
-    if ($user_id <= 0) {
-        $error = 'You must be logged in to manage jobs.';
+$allowed_job_types = ['full-time', 'part-time', 'contract', 'internship'];
+
+// ── Delete via POST + CSRF ────────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['action'] === 'delete_job') {
+    CSRF::verify();
+    $job_id = (int)($_POST['job_id'] ?? 0);
+
+    // SCP-AC-004: Pastikan job milik perusahaan ini (IDOR prevention)
+    $stmt = $conn->prepare("SELECT company_id FROM jobs WHERE id = ? LIMIT 1");
+    $stmt->execute([$job_id]);
+    $owner = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($owner && (int)$owner['company_id'] === $user_id) {
+        $stmt = $conn->prepare("DELETE FROM jobs WHERE id = ? AND company_id = ?");
+        $stmt->execute([$job_id, $user_id]);
+        header('Location: jobs.php?msg=deleted');
     } else {
-        $title = $_POST['title'];
-        $description = $_POST['description'];
-        $requirements = $_POST['requirements'];
-        $salary_min = $_POST['salary_min'];
-        $salary_max = $_POST['salary_max'];
-        $location = $_POST['location'];
-        $job_type = $_POST['job_type'];
-        $job_id = $_POST['job_id'] ?? null;
-
-    
-    $title_escaped = addslashes($title);
-    $description_escaped = addslashes($description);
-    $requirements_escaped = addslashes($requirements);
-    $location_escaped = addslashes($location);
-    $job_type_escaped = addslashes($job_type);
-
-    if ($job_id) {
-        // Check ownership before update
-        $job_id_escaped = addslashes($job_id);
-        $check_query = "SELECT company_id FROM jobs WHERE id = '$job_id_escaped'";
-        $check_result = $conn->query($check_query);
-        $job_owner = $check_result->fetch(PDO::FETCH_ASSOC);
-
-        if ($job_owner && $job_owner['company_id'] == $user_id) {
-            $query = "UPDATE jobs SET title = '$title_escaped', description = '$description_escaped',
-                     requirements = '$requirements_escaped', salary_min = $salary_min, salary_max = $salary_max,
-                     location = '$location_escaped', job_type = '$job_type_escaped' WHERE id = '$job_id_escaped' AND company_id = $user_id";
-            $action = 'updated';
-        } else {
-            $error = "Unauthorized: You can only edit your own jobs.";
-        }
-    } else {
-        $query = "INSERT INTO jobs (company_id, title, description, requirements, salary_min, salary_max, location, job_type)
-                 VALUES ($user_id, '$title_escaped', '$description_escaped', '$requirements_escaped', $salary_min, $salary_max, '$location_escaped', '$job_type_escaped')";
-        $action = 'created';
+        header('Location: jobs.php?err=unauthorized');
     }
-
-        if (isset($query) && $conn->query($query)) {
-            $message = "Job $action successfully!";
-        } elseif (!isset($error)) {
-            $error = "Failed to $action job.";
-        }
-    }
-}
-
-// Handle job deletion
-if (isset($_GET['delete'])) {
-    $job_id = addslashes($_GET['delete']); 
-
-    // Check ownership before delete
-    $check_query = "SELECT company_id FROM jobs WHERE id = '$job_id'";
-    $check_result = $conn->query($check_query);
-    $job_owner = $check_result->fetch(PDO::FETCH_ASSOC);
-
-    if ($job_owner && $job_owner['company_id'] == $user_id) {
-        
-        $query = "DELETE FROM jobs WHERE id = '$job_id' AND company_id = $user_id";
-        $conn->query($query);
-        $message = "Job deleted successfully!";
-    } else {
-        $error = "Unauthorized: You can only delete your own jobs.";
-    }
-
-    header('Location: jobs.php' . ($message ? '?msg=deleted' : '?err=unauthorized'));
     exit;
 }
 
-// Get jobs
-$query = "SELECT * FROM jobs WHERE company_id = $user_id ORDER BY created_at DESC";
-$jobs = $conn->query($query);
+// ── Create / Update ───────────────────────────────────────────────────
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['title'])) {
+    CSRF::verify();
 
-// Get job for editing with ownership check
-$edit_job = null;
-if (isset($_GET['edit'])) {
-    $edit_id = addslashes($_GET['edit']); 
-    $query = "SELECT * FROM jobs WHERE id = '$edit_id' AND company_id = $user_id";
-    $result = $conn->query($query);
-    $edit_job = $result->fetch(PDO::FETCH_ASSOC);
+    // SCP-IV-001, SCP-IV-003
+    $title        = trim($_POST['title']        ?? '');
+    $description  = trim($_POST['description']  ?? '');
+    $requirements = trim($_POST['requirements'] ?? '');
+    $salary_min   = (int)($_POST['salary_min']  ?? 0);
+    $salary_max   = (int)($_POST['salary_max']  ?? 0);
+    $location     = trim($_POST['location']     ?? '');
+    $job_type     = trim($_POST['job_type']     ?? '');
+    $job_id       = (int)($_POST['job_id']      ?? 0);
 
-    if (!$edit_job) {
-        $error = "Unauthorized: You can only edit your own jobs.";
+    if ($title === '' || $location === '' || !in_array($job_type, $allowed_job_types, true)) {
+        $error = 'Input tidak valid.';
+    } else {
+        if ($job_id > 0) {
+            // SCP-AC-004: Verifikasi ownership sebelum update (IDOR prevention)
+            $stmt = $conn->prepare("SELECT company_id FROM jobs WHERE id = ? LIMIT 1");
+            $stmt->execute([$job_id]);
+            $owner = $stmt->fetch(PDO::FETCH_ASSOC);
+
+            if ($owner && (int)$owner['company_id'] === $user_id) {
+                // SCP-SQL-001: Prepared statement
+                $stmt = $conn->prepare(
+                    "UPDATE jobs SET title=?, description=?, requirements=?,
+                     salary_min=?, salary_max=?, location=?, job_type=?
+                     WHERE id=? AND company_id=?"
+                );
+                $stmt->execute([$title, $description, $requirements,
+                                $salary_min, $salary_max, $location, $job_type,
+                                $job_id, $user_id]);
+                $message = 'Lowongan berhasil diperbarui!';
+            } else {
+                $error = 'Tidak diizinkan: Anda hanya bisa mengedit lowongan Anda sendiri.';
+            }
+        } else {
+            // SCP-SQL-001
+            $stmt = $conn->prepare(
+                "INSERT INTO jobs (company_id, title, description, requirements,
+                 salary_min, salary_max, location, job_type)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+            );
+            $stmt->execute([$user_id, $title, $description, $requirements,
+                            $salary_min, $salary_max, $location, $job_type]);
+            $message = 'Lowongan berhasil dibuat!';
+        }
     }
 }
+
+if (isset($_GET['msg']) && $_GET['msg'] === 'deleted') $message = 'Lowongan berhasil dihapus!';
+if (isset($_GET['err']) && $_GET['err'] === 'unauthorized') $error = 'Tidak diizinkan.';
+
+// SCP-SQL-001
+$stmt = $conn->prepare("SELECT * FROM jobs WHERE company_id = ? ORDER BY created_at DESC");
+$stmt->execute([$user_id]);
+$jobs = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+$edit_job = null;
+if (isset($_GET['edit'])) {
+    $edit_id = (int)$_GET['edit'];
+    $stmt = $conn->prepare("SELECT * FROM jobs WHERE id = ? AND company_id = ?");
+    $stmt->execute([$edit_id, $user_id]);
+    $edit_job = $stmt->fetch(PDO::FETCH_ASSOC);
+    if (!$edit_job) {
+        $error = 'Tidak diizinkan: Anda hanya bisa mengedit lowongan Anda sendiri.';
+    }
+}
+
+require_once '../../templates/header.php';
+require_once '../../templates/nav.php';
 ?>
 
 <div class="container-fluid">
@@ -122,19 +118,13 @@ if (isset($_GET['edit'])) {
             <div class="sidebar p-3">
                 <h5>Company Panel</h5>
                 <ul class="nav flex-column">
-                    <li class="nav-item">
-                        <a class="nav-link" href="dashboard.php">Dashboard</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="jobs.php">Manage Jobs</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="applicants.php">Applicants</a>
-                    </li>
+                    <li class="nav-item"><a class="nav-link" href="dashboard.php">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link active" href="jobs.php">Manage Jobs</a></li>
+                    <li class="nav-item"><a class="nav-link" href="applicants.php">Applicants</a></li>
                 </ul>
             </div>
         </div>
-        
+
         <div class="col-md-9">
             <div class="main-content">
                 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -143,59 +133,61 @@ if (isset($_GET['edit'])) {
                         <i class="fas fa-plus"></i> Post New Job
                     </button>
                 </div>
-                
+
                 <?php if ($message): ?>
-                    <div class="alert alert-success"><?php echo $message; ?></div>
+                    <div class="alert alert-success"><?php echo htmlspecialchars($message, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
                 <?php if ($error): ?>
-                    <div class="alert alert-danger"><?php echo $error; ?></div>
+                    <div class="alert alert-danger"><?php echo htmlspecialchars($error, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
-                
+
                 <div class="card">
                     <div class="card-body">
-                        <?php if ($jobs->rowCount() > 0): ?>
+                        <?php if ($jobs): ?>
                             <div class="table-responsive">
                                 <table class="table">
                                     <thead>
                                         <tr>
-                                            <th>Title</th>
-                                            <th>Location</th>
-                                            <th>Type</th>
-                                            <th>Status</th>
-                                            <th>Posted</th>
-                                            <th>Actions</th>
+                                            <th>Title</th><th>Location</th><th>Type</th>
+                                            <th>Status</th><th>Posted</th><th>Actions</th>
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        <?php while ($job = $jobs->fetch(PDO::FETCH_ASSOC)): ?>
+                                        <?php foreach ($jobs as $job): ?>
                                             <tr>
-                                                <td><?php echo $job['title']; ?></td>
-                                                <td><?php echo $job['location']; ?></td>
-                                                <td><?php echo ucfirst($job['job_type']); ?></td>
+                                                <!-- SCP-OE-001 -->
+                                                <td><?php echo htmlspecialchars($job['title'],    ENT_QUOTES, 'UTF-8'); ?></td>
+                                                <td><?php echo htmlspecialchars($job['location'], ENT_QUOTES, 'UTF-8'); ?></td>
+                                                <td><?php echo htmlspecialchars(ucfirst($job['job_type']), ENT_QUOTES, 'UTF-8'); ?></td>
                                                 <td>
                                                     <span class="badge bg-<?php echo $job['status'] === 'active' ? 'success' : 'secondary'; ?>">
-                                                        <?php echo ucfirst($job['status']); ?>
+                                                        <?php echo htmlspecialchars(ucfirst($job['status']), ENT_QUOTES, 'UTF-8'); ?>
                                                     </span>
                                                 </td>
                                                 <td><?php echo date('M d, Y', strtotime($job['created_at'])); ?></td>
                                                 <td>
-                                                    <a href="?edit=<?php echo $job['id']; ?>" class="btn btn-sm btn-warning">Edit</a>
-                                                    <a href="job-applicants.php?job_id=<?php echo $job['id']; ?>" class="btn btn-sm btn-info">Applicants</a>
-                                                    <a href="?delete=<?php echo $job['id']; ?>" class="btn btn-sm btn-danger" 
-                                                       onclick="return confirm('Delete this job?')">Delete</a>
+                                                    <a href="?edit=<?php echo (int)$job['id']; ?>" class="btn btn-sm btn-warning">Edit</a>
+                                                    <a href="job-applicants.php?job_id=<?php echo (int)$job['id']; ?>" class="btn btn-sm btn-info">Applicants</a>
+                                                    <!-- SCP-FU-004: Delete via POST -->
+                                                    <form method="POST" class="d-inline"
+                                                          onsubmit="return confirm('Hapus lowongan ini?')">
+                                                        <?php echo CSRF::input(); ?>
+                                                        <input type="hidden" name="action" value="delete_job">
+                                                        <input type="hidden" name="job_id" value="<?php echo (int)$job['id']; ?>">
+                                                        <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+                                                    </form>
                                                 </td>
                                             </tr>
-                                        <?php endwhile; ?>
+                                        <?php endforeach; ?>
                                     </tbody>
                                 </table>
                             </div>
                         <?php else: ?>
                             <div class="text-center py-5">
                                 <i class="fas fa-briefcase fa-3x text-muted mb-3"></i>
-                                <h5>No Jobs Posted Yet</h5>
-                                <p class="text-muted">Start by posting your first job opening.</p>
+                                <h5>Belum Ada Lowongan</h5>
                                 <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#jobModal">
-                                    Post Your First Job
+                                    Buat Lowongan Pertama
                                 </button>
                             </div>
                         <?php endif; ?>
@@ -215,60 +207,59 @@ if (isset($_GET['edit'])) {
                 <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
             </div>
             <form method="POST">
+                <?php echo CSRF::input(); /* SCP-CSRF-001 */ ?>
                 <div class="modal-body">
                     <?php if ($edit_job): ?>
-                        <input type="hidden" name="job_id" value="<?php echo $edit_job['id']; ?>">
+                        <input type="hidden" name="job_id" value="<?php echo (int)$edit_job['id']; ?>">
                     <?php endif; ?>
-                    
+
                     <div class="mb-3">
                         <label for="title" class="form-label">Job Title</label>
-                        <input type="text" class="form-control" id="title" name="title" 
-                               value="<?php echo $edit_job['title'] ?? ''; ?>" required>
+                        <input type="text" class="form-control" id="title" name="title" maxlength="200"
+                               value="<?php echo htmlspecialchars($edit_job['title'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" required>
                     </div>
-                    
                     <div class="mb-3">
                         <label for="description" class="form-label">Job Description</label>
-                        <textarea class="form-control" id="description" name="description" rows="5" required><?php echo $edit_job['description'] ?? ''; ?></textarea>
+                        <textarea class="form-control" id="description" name="description" rows="5" required><?php echo htmlspecialchars($edit_job['description'] ?? '', ENT_QUOTES, 'UTF-8'); ?></textarea>
                     </div>
-                    
                     <div class="mb-3">
                         <label for="requirements" class="form-label">Requirements</label>
-                        <textarea class="form-control" id="requirements" name="requirements" rows="4" required><?php echo $edit_job['requirements'] ?? ''; ?></textarea>
+                        <textarea class="form-control" id="requirements" name="requirements" rows="4" required><?php echo htmlspecialchars($edit_job['requirements'] ?? '', ENT_QUOTES, 'UTF-8'); ?></textarea>
                     </div>
-                    
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="salary_min" class="form-label">Minimum Salary</label>
-                                <input type="number" class="form-control" id="salary_min" name="salary_min" 
-                                       value="<?php echo $edit_job['salary_min'] ?? ''; ?>">
+                                <label class="form-label">Minimum Salary</label>
+                                <input type="number" class="form-control" name="salary_min" min="0"
+                                       value="<?php echo (int)($edit_job['salary_min'] ?? 0); ?>">
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="salary_max" class="form-label">Maximum Salary</label>
-                                <input type="number" class="form-control" id="salary_max" name="salary_max" 
-                                       value="<?php echo $edit_job['salary_max'] ?? ''; ?>">
+                                <label class="form-label">Maximum Salary</label>
+                                <input type="number" class="form-control" name="salary_max" min="0"
+                                       value="<?php echo (int)($edit_job['salary_max'] ?? 0); ?>">
                             </div>
                         </div>
                     </div>
-                    
                     <div class="row">
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="location" class="form-label">Location</label>
-                                <input type="text" class="form-control" id="location" name="location" 
-                                       value="<?php echo $edit_job['location'] ?? ''; ?>" required>
+                                <label class="form-label">Location</label>
+                                <input type="text" class="form-control" name="location" maxlength="100"
+                                       value="<?php echo htmlspecialchars($edit_job['location'] ?? '', ENT_QUOTES, 'UTF-8'); ?>" required>
                             </div>
                         </div>
                         <div class="col-md-6">
                             <div class="mb-3">
-                                <label for="job_type" class="form-label">Job Type</label>
-                                <select class="form-control" id="job_type" name="job_type" required>
-                                    <option value="full-time" <?php echo ($edit_job['job_type'] ?? '') === 'full-time' ? 'selected' : ''; ?>>Full Time</option>
-                                    <option value="part-time" <?php echo ($edit_job['job_type'] ?? '') === 'part-time' ? 'selected' : ''; ?>>Part Time</option>
-                                    <option value="contract" <?php echo ($edit_job['job_type'] ?? '') === 'contract' ? 'selected' : ''; ?>>Contract</option>
-                                    <option value="internship" <?php echo ($edit_job['job_type'] ?? '') === 'internship' ? 'selected' : ''; ?>>Internship</option>
+                                <label class="form-label">Job Type</label>
+                                <select class="form-control" name="job_type" required>
+                                    <?php foreach ($allowed_job_types as $jt): ?>
+                                        <option value="<?php echo $jt; ?>"
+                                            <?php echo ($edit_job['job_type'] ?? '') === $jt ? 'selected' : ''; ?>>
+                                            <?php echo ucfirst(str_replace('-', ' ', $jt)); ?>
+                                        </option>
+                                    <?php endforeach; ?>
                                 </select>
                             </div>
                         </div>
@@ -287,7 +278,6 @@ if (isset($_GET['edit'])) {
 
 <?php if ($edit_job): ?>
 <script>
-    // Auto-open modal for editing
     var jobModal = new bootstrap.Modal(document.getElementById('jobModal'));
     jobModal.show();
 </script>

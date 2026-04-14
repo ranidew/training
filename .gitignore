@@ -1,2 +1,4 @@
 node_modules
 .env
+.generate_checklist.py
+.Master_Checklist_Secure_Coding.xlsx
